@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Body Tracking · 3D Respiratory Device</title>
+
+<style>
+  :root{
+    --bg: #0a0f14;
+    --panel: #101820;
+    --panel-2: #16202b;
+    --line: #223140;
+    --accent: #3ee6c4;
+    --accent-dim: #1f8a76;
+    --warn: #ff6b6b;
+    --text: #e7f1f0;
+    --text-dim: #86a0a8;
+    --radius: 14px;
+  }
+  *{ box-sizing: border-box; }
+  html,body{
+    margin:0; padding:0; height:100%; background:var(--bg); color:var(--text);
+    font-family: -apple-system, "Segoe UI", "IRANSans", Tahoma, sans-serif;
+    overflow:hidden; overscroll-behavior:none;
+  }
+  #app{ position:relative; width:100vw; height:100dvh; }
+
+  /* ---- Stage: camera + skeleton canvas + three canvas overlay ---- */
+  #stage{
+    position:absolute; inset:0; background:#000;
+    display:flex; align-items:center; justify-content:center;
+  }
+  #video, #skeletonCanvas, #glCanvas{
+    position:absolute; top:50%; left:50%; transform:translate(-50%,-50%) scaleX(-1);
+    max-width:100%; max-height:100%;
+  }
+  #video{ object-fit:cover; }
+  #skeletonCanvas{ pointer-events:none; }
+  #glCanvas{ pointer-events:none; background:transparent; }
+
+  /* ---- Top bar ---- */
+  #topbar{
+    position:absolute; top:0; left:0; right:0; z-index:20;
+    padding: max(12px, env(safe-area-inset-top)) 14px 10px;
+    background: linear-gradient(to bottom, rgba(0,0,0,.65), transparent);
+    text-align:center; pointer-events:none;
+  }
+  #topbar h1{ margin:0; font-size:14px; letter-spacing:.04em; color:var(--text); font-weight:700; }
+  #topbar p{ margin:2px 0 0; font-size:11px; color:var(--accent); letter-spacing:.08em; }
+
+  /* ---- Status chips ---- */
+  #status{
+    position:absolute; top:56px; left:10px; right:10px; z-index:20;
+    display:flex; gap:6px; justify-content:center; flex-wrap:wrap; pointer-events:none;
+  }
+  .chip{
+    font-size:11px; padding:4px 9px; border-radius:999px;
+    background: rgba(16,24,32,.75); border:1px solid var(--line); color:var(--text-dim);
+    backdrop-filter: blur(4px);
+  }
+  .chip.on{ color:var(--accent); border-color: var(--accent-dim); }
+  .chip.off{ color:var(--warn); border-color: #5a2a2a; }
+
+  /* ---- Message banner (errors / hints) ---- */
+  #banner{
+    position:absolute; bottom:96px; left:12px; right:12px; z-index:25;
+    text-align:center; font-size:13px; line-height:1.5; color:var(--text);
+    background: rgba(20,10,10,.82); border:1px solid #5a2a2a; border-radius:var(--radius);
+    padding:10px 14px; display:none;
+  }
+  #banner.show{ display:block; }
+  #banner.info{ background: rgba(10,20,22,.82); border-color: var(--accent-dim); }
+
+  /* ---- Bottom controls ---- */
+  #controls{
+    position:absolute; bottom:0; left:0; right:0; z-index:20;
+    padding: 10px 12px max(12px, env(safe-area-inset-bottom));
+    background: linear-gradient(to top, rgba(0,0,0,.75), transparent);
+    display:flex; flex-direction:column; gap:8px;
+  }
+  #modeRow{ display:flex; gap:6px; justify-content:center; }
+  .modeBtn{
+    flex:1; max-width:140px; padding:7px 6px; border-radius:10px; border:1px solid var(--line);
+    background: var(--panel); color:var(--text-dim); font-size:11px; text-align:center;
+  }
+  .modeBtn.active{ background: var(--accent-dim); color:#fff; border-color: var(--accent); }
+
+  #btnRow{ display:flex; gap:8px; }
+  button.main{
+    flex:1; padding:12px 8px; border-radius:12px; border:1px solid var(--line);
+    background: var(--panel); color:var(--text); font-size:13px; font-weight:600;
+    display:flex; flex-direction:column; align-items:center; gap:2px;
+  }
+  button.main .ic{ font-size:18px; }
+  button.main.primary{ background: var(--accent-dim); border-color: var(--accent); color:#fff; }
+  button.main:active{ transform: scale(.97); }
+  button.main:disabled{ opacity:.45; }
+
+  /* ---- Debug / settings panel ---- */
+  #panel{
+    position:absolute; z-index:30; right:0; top:0; bottom:0; width:min(320px, 86vw);
+    background: var(--panel); border-left:1px solid var(--line);
+    transform: translateX(100%); transition: transform .25s ease;
+    overflow-y:auto; padding: max(16px, env(safe-area-inset-top)) 16px 24px;
+  }
+  #panel.open{ transform: translateX(0); }
+  #panel h2{ font-size:14px; margin:0 0 12px; color:var(--accent); }
+  #panel h3{ font-size:12px; margin:18px 0 8px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.06em; }
+  .field{ margin-bottom:10px; }
+  .field label{ display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); margin-bottom:3px; }
+  .field label span.val{ color:var(--accent); font-family: monospace; }
+  .field input[type=range]{ width:100%; accent-color: var(--accent); }
+  .field select{ width:100%; padding:6px; border-radius:8px; background:var(--panel-2); color:var(--text); border:1px solid var(--line); }
+  #panelClose{
+    position:absolute; top:10px; left:10px; width:30px; height:30px; border-radius:50%;
+    background: var(--panel-2); border:1px solid var(--line); color:var(--text); font-size:16px;
+  }
+  #panelBackdrop{
+    position:absolute; inset:0; z-index:29; background:rgba(0,0,0,.4);
+    display:none;
+  }
+  #panelBackdrop.show{ display:block; }
+
+  .hidden{ display:none !important; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="skeletonCanvas"></canvas>
+    <canvas id="glCanvas"></canvas>
+  </div>
+
+  <div id="topbar">
+    <h1>BODY TRACKING</h1>
+    <p>3D RESPIRATORY DEVICE</p>
+  </div>
+
+  <div id="status">
+    <span class="chip off" id="chipCamera">Camera: OFF</span>
+    <span class="chip off" id="chipTracking">Body Tracking: OFF</span>
+    <span class="chip off" id="chipModel">Model: --</span>
+  </div>
+
+  <div id="banner"></div>
+
+  <div id="controls">
+    <div id="modeRow">
+      <button class="modeBtn" data-mode="camera">Camera Only</button>
+      <button class="modeBtn" data-mode="skeleton">Skeleton</button>
+      <button class="modeBtn active" data-mode="ar">AR Overlay</button>
+    </div>
+    <div id="btnRow">
+      <button class="main primary" id="btnStart"><span class="ic">🎥</span>Start Tracking</button>
+      <button class="main" id="btnCalibrate" disabled><span class="ic">🎯</span>Calibrate</button>
+      <button class="main" id="btnSettings"><span class="ic">⚙</span>Settings</button>
+    </div>
+  </div>
+
+  <div id="panelBackdrop"></div>
+  <div id="panel">
+    <button id="panelClose">✕</button>
+    <h2>Debug &amp; Anchor Settings</h2>
+
+    <h3>Anchor</h3>
+    <div class="field">
+      <label>Attachment point</label>
+      <select id="selAnchor">
+        <option value="chest" selected>Chest (دستگاه تنفسی)</option>
+        <option value="head">Head</option>
+        <option value="shoulder">Shoulder</option>
+        <option value="leftArm">Left Arm</option>
+        <option value="rightArm">Right Arm</option>
+        <option value="leftHand">Left Hand</option>
+        <option value="rightHand">Right Hand</option>
+        <option value="pelvis">Pelvis</option>
+        <option value="leftLeg">Left Leg</option>
+        <option value="rightLeg">Right Leg</option>
+      </select>
+    </div>
+
+    <h3>Offset</h3>
+    <div class="field"><label>X Offset <span class="val" id="vOffX">0.00</span></label>
+      <input type="range" id="rOffX" min="-1" max="1" step="0.01" value="0"></div>
+    <div class="field"><label>Y Offset <span class="val" id="vOffY">0.00</span></label>
+      <input type="range" id="rOffY" min="-1" max="1" step="0.01" value="0"></div>
+    <div class="field"><label>Z Offset <span class="val" id="vOffZ">0.00</span></label>
+      <input type="range" id="rOffZ" min="-1" max="1" step="0.01" value="0"></div>
+
+    <h3>Scale &amp; Rotation</h3>
+    <div class="field"><label>Scale multiplier <span class="val" id="vScale">1.00</span></label>
+      <input type="range" id="rScale" min="0.1" max="3" step="0.05" value="1"></div>
+    <div class="field"><label>Rotation X (°) <span class="val" id="vRotX">0</span></label>
+      <input type="range" id="rRotX" min="-180" max="180" step="1" value="0"></div>
+    <div class="field"><label>Rotation Y (°) <span class="val" id="vRotY">0</span></label>
+      <input type="range" id="rRotY" min="-180" max="180" step="1" value="0"></div>
+    <div class="field"><label>Rotation Z (°) <span class="val" id="vRotZ">0</span></label>
+      <input type="range" id="rRotZ" min="-180" max="180" step="1" value="0"></div>
+
+    <h3>Smoothing</h3>
+    <div class="field"><label>Position smoothing <span class="val" id="vSmoothP">0.15</span></label>
+      <input type="range" id="rSmoothP" min="0.01" max="1" step="0.01" value="0.15"></div>
+    <div class="field"><label>Rotation smoothing <span class="val" id="vSmoothR">0.12</span></label>
+      <input type="range" id="rSmoothR" min="0.01" max="1" step="0.01" value="0.12"></div>
+    <div class="field"><label>Scale smoothing <span class="val" id="vSmoothS">0.10</span></label>
+      <input type="range" id="rSmoothS" min="0.01" max="1" step="0.01" value="0.10"></div>
+
+    <h3>Camera</h3>
+    <div class="field">
+      <label>Device</label>
+      <select id="selCamera"></select>
+    </div>
+  </div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- Import map: three.js + MediaPipe tasks-vision from a CDN     -->
+<!-- ============================================================ -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+    "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { PoseLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
+
+/* ==========================================================================
+   ARCHITECTURE (short)
+   --------------------------------------------------------------------------
+   Camera(video) --> MediaPipe PoseLandmarker (VIDEO mode, worldLandmarks) -->
+   TorsoBasis (shoulders+hips) --> Anchor (position/scale/quaternion) -->
+   Smoothing (lerp/slerp) --> Three.js scene rendered on a transparent
+   <canvas> stacked on top of the mirrored <video>.
+   Two canvases sit above the video: one 2D canvas draws the debug skeleton,
+   one WebGL canvas renders the GLB. Everything is mirrored together with
+   CSS `scaleX(-1)` so left/right stay visually correct for a selfie view;
+   the math below works in *unmirrored* MediaPipe space and lets CSS do the
+   mirroring, so it never has to special-case left/right itself.
+   ========================================================================== */
+
+/* ---------------------------- DOM references ---------------------------- */
+const video = document.getElementById("video");
+const skeletonCanvas = document.getElementById("skeletonCanvas");
+const skCtx = skeletonCanvas.getContext("2d");
+const glCanvas = document.getElementById("glCanvas");
+
+const btnStart = document.getElementById("btnStart");
+const btnCalibrate = document.getElementById("btnCalibrate");
+const btnSettings = document.getElementById("btnSettings");
+const panel = document.getElementById("panel");
+const panelBackdrop = document.getElementById("panelBackdrop");
+const panelClose = document.getElementById("panelClose");
+const banner = document.getElementById("banner");
+
+const chipCamera = document.getElementById("chipCamera");
+const chipTracking = document.getElementById("chipTracking");
+const chipModel = document.getElementById("chipModel");
+const modeButtons = [...document.querySelectorAll(".modeBtn")];
+const selAnchor = document.getElementById("selAnchor");
+const selCamera = document.getElementById("selCamera");
+
+/* ------------------------------ App state -------------------------------- */
+const state = {
+  mode: "ar",              // "camera" | "skeleton" | "ar"
+  running: false,
+  poseLandmarker: null,
+  lastVideoTime: -1,
+  currentDeviceId: null,
+  anchorType: "chest",
+  showSkeleton: false,
+  calibration: null,       // reference pose snapshot, or null
+  settings: {
+    offset: new THREE.Vector3(0, 0, 0),
+    scaleMultiplier: 1.0,
+    rotationOffsetDeg: new THREE.Vector3(0, 0, 0),
+    positionSmoothing: 0.15,
+    rotationSmoothing: 0.12,
+    scaleSmoothing: 0.10,
+  },
+};
+
+/* ===========================================================================
+   1) THREE.JS SCENE (transparent, overlaid on the video)
+   =========================================================================== */
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, alpha: true, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const scene = new THREE.Scene();
+const camera3d = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+camera3d.position.set(0, 0, 3);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.1));
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.0);
+keyLight.position.set(1, 2, 2);
+scene.add(keyLight);
+
+// Root that we drive with position/quaternion/scale from the body pose.
+const anchorRoot = new THREE.Group();
+scene.add(anchorRoot);
+
+// Placeholder shown until the real GLB is loaded (or if it fails to load),
+// so tracking can be tested even without model.glb in place.
+const placeholder = new THREE.Mesh(
+  new THREE.CapsuleGeometry(0.18, 0.32, 4, 12),
+  new THREE.MeshStandardMaterial({ color: 0x3ee6c4, transparent: true, opacity: 0.85 })
+);
+anchorRoot.add(placeholder);
+
+let modelRoot = null; // populated once model.glb loads successfully
+
+function resizeRendererToVideo() {
+  const w = video.videoWidth || video.clientWidth || 640;
+  const h = video.videoHeight || video.clientHeight || 480;
+  [skeletonCanvas, glCanvas].forEach(c => { c.width = w; c.height = h; });
+  renderer.setSize(w, h, false);
+  camera3d.aspect = w / h;
+  camera3d.updateProjectionMatrix();
+}
+
+/* ===========================================================================
+   2) LOAD model.glb  (with graceful fallback to the placeholder capsule)
+   =========================================================================== */
+function normalizeAndScaleModel(root) {
+  const box = new THREE.Box3().setFromObject(root);
+  const size = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  box.getSize(size);
+  box.getCenter(center);
+  // Re-center so the model's own origin is its bounding-box center.
+  root.position.sub(center);
+  const wrapper = new THREE.Group();
+  wrapper.add(root);
+  // Normalize so the model's largest dimension is ~1 unit; the anchor
+  // system scales this wrapper again based on measured shoulder width.
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  wrapper.userData.baseScale = 1 / maxDim;
+  wrapper.scale.setScalar(wrapper.userData.baseScale);
+  return wrapper;
+}
+
+new GLTFLoader().load(
+  "./model.glb",
+  (gltf) => {
+    const wrapper = normalizeAndScaleModel(gltf.scene);
+    anchorRoot.remove(placeholder);
+    anchorRoot.add(wrapper);
+    modelRoot = wrapper;
+    chipModel.textContent = "Model: Loaded";
+    chipModel.className = "chip on";
+  },
+  undefined,
+  (err) => {
+    console.warn("model.glb not found or failed to load; using placeholder.", err);
+    chipModel.textContent = "Model: Placeholder";
+    chipModel.className = "chip off";
+  }
+);
+
+/* ===========================================================================
+   3) ANCHOR / BODY ATTACHMENT SYSTEM
+   -------------------------------------------------------------------------
+   Each anchor definition says which landmark pair(s) define its local
+   coordinate frame. "chest" (the default, for the respiratory device) uses
+   shoulders + hips, exactly as requested.
+   =========================================================================== */
+const L = PoseLandmarker; // for landmark index constants via names below
+const IDX = {
+  nose: 0,
+  leftShoulder: 11, rightShoulder: 12,
+  leftElbow: 13, rightElbow: 14,
+  leftWrist: 15, rightWrist: 16,
+  leftHip: 23, rightHip: 24,
+  leftKnee: 25, rightKnee: 26,
+  leftAnkle: 27, rightAnkle: 28,
+};
+
+const ANCHORS = {
+  chest:     { frame: "torso", origin: "chestCenter" },
+  head:      { frame: "torso", origin: "nose" },
+  shoulder:  { frame: "torso", origin: "shoulderCenter" },
+  pelvis:    { frame: "torso", origin: "hipCenter" },
+  leftArm:   { frame: "limb",  a: "leftShoulder", b: "leftElbow" },
+  rightArm:  { frame: "limb",  a: "rightShoulder", b: "rightElbow" },
+  leftHand:  { frame: "limb",  a: "leftElbow", b: "leftWrist" },
+  rightHand: { frame: "limb",  a: "rightElbow", b: "rightWrist" },
+  leftLeg:   { frame: "limb",  a: "leftHip", b: "leftKnee" },
+  rightLeg:  { frame: "limb",  a: "rightHip", b: "rightKnee" },
+};
+
+/** Build a torso local basis (Right / Up / Forward) + key points from world landmarks. */
+function computeTorsoFrame(w) {
+  const ls = w[IDX.leftShoulder], rs = w[IDX.rightShoulder];
+  const lh = w[IDX.leftHip], rh = w[IDX.rightHip];
+  if (!ls || !rs || !lh || !rh) return null;
+
+  const shoulderCenter = midpoint(ls, rs);
+  const hipCenter = midpoint(lh, rh);
+  // Position estimate for the torso: weighted blend of shoulders & hips
+  // (closer to the chest, per the brief) rather than shoulders alone.
+  const chestCenter = lerpVec3(shoulderCenter, hipCenter, 0.35);
+
+  // Right = RightShoulder - LeftShoulder (world landmarks are already
+  // in "real" left/right, i.e. not mirrored, regardless of selfie view).
+  const right = normalize(sub(rs, ls));
+  // Up = ShoulderCenter - HipCenter
+  const up = normalize(sub(shoulderCenter, hipCenter));
+  // Forward = Right x Up  (out of the person's chest, right-handed)
+  let forward = normalize(cross(right, up));
+  // Re-orthogonalize Up so the basis stays a clean rotation matrix.
+  const trueUp = normalize(cross(forward, right));
+
+  const shoulderWidth = distance(ls, rs);
+
+  return { shoulderCenter, hipCenter, chestCenter, nose: w[IDX.nose],
+           right, up: trueUp, forward, shoulderWidth };
+}
+
+function computeLimbFrame(w, def, torso) {
+  const a = w[IDX[def.a]], b = w[IDX[def.b]];
+  if (!a || !b || !torso) return null;
+  const origin = midpoint(a, b);
+  const dir = normalize(sub(b, a)); // limb's own "up" axis
+  // Use torso.right as a stable reference to build an orthogonal frame
+  // for the limb (limbs don't carry enough points for a full basis).
+  let right = normalize(cross(dir, torso.forward));
+  if (!isFinite(right.x)) right = torso.right.clone();
+  const forward = normalize(cross(right, dir));
+  return { origin, right, up: dir, forward, shoulderWidth: torso.shoulderWidth };
+}
+
+function frameToQuaternion(frame) {
+  const m = new THREE.Matrix4().makeBasis(frame.right, frame.up, frame.forward);
+  return new THREE.Quaternion().setFromRotationMatrix(m);
+}
+
+function anchorOriginPoint(frame, key) {
+  switch (key) {
+    case "chestCenter": return frame.chestCenter;
+    case "shoulderCenter": return frame.shoulderCenter;
+    case "hipCenter": return frame.hipCenter;
+    case "nose": return frame.nose;
+    default: return frame.chestCenter;
+  }
+}
+
+/** Full pipeline: world landmarks -> {position, quaternion, scale} target for the anchor root. */
+function computeAnchorTarget(worldLandmarks) {
+  const torso = computeTorsoFrame(worldLandmarks);
+  if (!torso) return null;
+
+  const def = ANCHORS[state.anchorType] || ANCHORS.chest;
+  let frame, origin;
+  if (def.frame === "torso") {
+    frame = torso;
+    origin = anchorOriginPoint(torso, def.origin);
+  } else {
+    frame = computeLimbFrame(worldLandmarks, def, torso);
+    if (!frame) return null;
+    origin = frame.origin;
+  }
+
+  const quat = frameToQuaternion(frame);
+  const scale = Math.max(0.05, frame.shoulderWidth) * state.settings.scaleMultiplier;
+
+  return { position: origin.clone(), quaternion: quat, scale, torso };
+}
+
+/* -------------------------- small vector helpers ------------------------- */
+function toVec3(p) { return new THREE.Vector3(p.x, p.y, p.z); }
+function midpoint(a, b) { return new THREE.Vector3().addVectors(toVec3(a), toVec3(b)).multiplyScalar(0.5); }
+function sub(a, b) { return new THREE.Vector3().subVectors(toVec3(a), toVec3(b)); }
+function cross(a, b) { return new THREE.Vector3().crossVectors(a, b); }
+function normalize(v) { const r = v.clone(); return r.lengthSq() > 1e-8 ? r.normalize() : r; }
+function distance(a, b) { return toVec3(a).distanceTo(toVec3(b)); }
+function lerpVec3(a, b, t) { return a.clone().lerp(b, t); }
+
+/* ===========================================================================
+   4) CALIBRATION
+   -------------------------------------------------------------------------
+   Stores the current anchor target as a reference. Later frames are
+   expressed relative to it (this reference primarily re-zeroes rotation
+   drift and lets the user re-anchor the model without touching sliders).
+   =========================================================================== */
+function calibrate(target) {
+  state.calibration = {
+    positionRef: target.position.clone(),
+    quaternionRef: target.quaternion.clone(),
+    scaleRef: target.scale,
+  };
+  flashBanner("کالیبراسیون انجام شد. حالا صاف بایستید تا مدل تنظیم شود.", "info", 2200);
+}
+
+/* ===========================================================================
+   5) SMOOTHING STATE for the anchor root (Lerp position/scale, Slerp rotation)
+   =========================================================================== */
+const smoothed = {
+  position: new THREE.Vector3(0, 0, 0),
+  quaternion: new THREE.Quaternion(),
+  scale: 0.3,
+  initialized: false,
+};
+
+function applyAnchorTarget(target) {
+  const s = state.settings;
+
+  // Manual offsets (debug panel), applied in the anchor's own local axes
+  // so "X Offset" always means "along the current right vector", etc.
+  const off = new THREE.Vector3(s.offset.x, s.offset.y, s.offset.z)
+    .applyQuaternion(target.quaternion);
+  const desiredPosition = target.position.clone().add(off);
+
+  const rotOffset = new THREE.Euler(
+    THREE.MathUtils.degToRad(s.rotationOffsetDeg.x),
+    THREE.MathUtils.degToRad(s.rotationOffsetDeg.y),
+    THREE.MathUtils.degToRad(s.rotationOffsetDeg.z)
+  );
+  const desiredQuaternion = target.quaternion.clone()
+    .multiply(new THREE.Quaternion().setFromEuler(rotOffset));
+
+  const desiredScale = target.scale;
+
+  if (!smoothed.initialized) {
+    smoothed.position.copy(desiredPosition);
+    smoothed.quaternion.copy(desiredQuaternion);
+    smoothed.scale = desiredScale;
+    smoothed.initialized = true;
+  } else {
+    smoothed.position.lerp(desiredPosition, s.positionSmoothing);
+    smoothed.quaternion.slerp(desiredQuaternion, s.rotationSmoothing);
+    smoothed.scale += (desiredScale - smoothed.scale) * s.scaleSmoothing;
+  }
+
+  anchorRoot.position.copy(smoothed.position);
+  anchorRoot.quaternion.copy(smoothed.quaternion);
+  anchorRoot.scale.setScalar(smoothed.scale);
+}
+
+/* ===========================================================================
+   6) COORDINATE MAPPING: MediaPipe world landmarks -> Three.js camera space
+   -------------------------------------------------------------------------
+   PoseLandmarker world landmarks are metric, roughly hip-centered, with
+   x growing to the subject's right, y growing UP, z growing toward the
+   camera being negative-ish (MediaPipe docs: same orientation as the
+   hips). We simply need them expressed in front of our Three.js camera,
+   which looks down -Z from (0,0,3). So we translate world landmarks into
+   that space and let the anchor system computed above operate directly in
+   this space (no separate 2D->3D re-projection is done; see README for
+   the accuracy trade-off this implies).
+   =========================================================================== */
+function mapWorldLandmarksToScene(worldLandmarks) {
+  // Shift so the person roughly sits in front of the camera, and flip Z
+  // so "closer to camera" matches Three.js camera looking down -Z.
+  return worldLandmarks.map(p => ({ x: p.x, y: p.y, z: -p.z }));
+}
+
+/* ===========================================================================
+   7) MEDIAPIPE POSE LANDMARKER SETUP
+   =========================================================================== */
+async function setupPoseLandmarker() {
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+  );
+  state.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+      delegate: "GPU",
+    },
+    runningMode: "VIDEO",
+    numPoses: 1,
+  });
+}
+
+/* ===========================================================================
+   8) SKELETON DEBUG DRAWING
+   =========================================================================== */
+const SKELETON_EDGES = [
+  [IDX.leftShoulder, IDX.rightShoulder],
+  [IDX.leftShoulder, IDX.leftElbow], [IDX.leftElbow, IDX.leftWrist],
+  [IDX.rightShoulder, IDX.rightElbow], [IDX.rightElbow, IDX.rightWrist],
+  [IDX.leftShoulder, IDX.leftHip], [IDX.rightShoulder, IDX.rightHip],
+  [IDX.leftHip, IDX.rightHip],
+  [IDX.leftHip, IDX.leftKnee], [IDX.leftKnee, IDX.leftAnkle],
+  [IDX.rightHip, IDX.rightKnee], [IDX.rightKnee, IDX.rightAnkle],
+  [IDX.nose, IDX.leftShoulder], [IDX.nose, IDX.rightShoulder],
+];
+
+function drawSkeleton(landmarks) {
+  const w = skeletonCanvas.width, h = skeletonCanvas.height;
+  skCtx.clearRect(0, 0, w, h);
+  if (!state.showSkeleton || !landmarks) return;
+
+  skCtx.strokeStyle = "#3ee6c4";
+  skCtx.lineWidth = 3;
+  skCtx.fillStyle = "#ffffff";
+
+  SKELETON_EDGES.forEach(([ai, bi]) => {
+    const a = landmarks[ai], b = landmarks[bi];
+    if (!a || !b) return;
+    skCtx.beginPath();
+    skCtx.moveTo(a.x * w, a.y * h);
+    skCtx.lineTo(b.x * w, b.y * h);
+    skCtx.stroke();
+  });
+  Object.values(IDX).forEach(i => {
+    const p = landmarks[i];
+    if (!p) return;
+    skCtx.beginPath();
+    skCtx.arc(p.x * w, p.y * h, 4, 0, Math.PI * 2);
+    skCtx.fill();
+  });
+}
+
+/* ===========================================================================
+   9) MAIN LOOP
+   =========================================================================== */
+let noBodyFrames = 0;
+
+function renderLoop() {
+  if (!state.running) return;
+  requestAnimationFrame(renderLoop);
+
+  if (video.readyState < 2) return;
+  if (video.currentTime === state.lastVideoTime) {
+    renderer.render(scene, camera3d); // keep last pose while waiting for a new video frame
+    return;
+  }
+  state.lastVideoTime = video.currentTime;
+
+  const nowMs = performance.now();
+  const result = state.poseLandmarker.detectForVideo(video, nowMs);
+
+  const hasBody = result.landmarks && result.landmarks.length > 0;
+  glCanvas.style.visibility = state.mode === "ar" ? "visible" : "hidden";
+  skeletonCanvas.style.visibility = state.mode !== "camera" ? "visible" : "hidden";
+
+  if (hasBody) {
+    noBodyFrames = 0;
+    hideBanner();
+    drawSkeleton(state.showSkeleton ? result.landmarks[0] : null);
+
+    if (state.mode === "ar") {
+      const worldLm = result.worldLandmarks && result.worldLandmarks[0];
+      const source = worldLm ? mapWorldLandmarksToScene(worldLm) : null;
+      const target = source ? computeAnchorTarget(source) : null;
+      if (target) applyAnchorTarget(target);
+    }
+  } else {
+    drawSkeleton(null);
+    noBodyFrames++;
+    if (noBodyFrames > 30) {
+      flashBanner("بدن در تصویر شناسایی نشد. لطفاً تمام بدن خود را در کادر قرار دهید.", "info");
+    }
+  }
+
+  renderer.render(scene, camera3d);
+}
+
+/* ===========================================================================
+   10) CAMERA SETUP
+   =========================================================================== */
+async function listCameras() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d => d.kind === "videoinput");
+    selCamera.innerHTML = "";
+    cams.forEach((c, i) => {
+      const opt = document.createElement("option");
+      opt.value = c.deviceId;
+      opt.textContent = c.label || `Camera ${i + 1}`;
+      selCamera.appendChild(opt);
+    });
+  } catch (e) { /* enumerateDevices may need permission first; ignore */ }
+}
+
+async function startCamera(deviceId) {
+  const constraints = {
+    video: deviceId
+      ? { deviceId: { exact: deviceId } }
+      : { facingMode: { ideal: "environment" }, width: { ideal: 960 }, height: { ideal: 720 } },
+    audio: false,
+  };
+  const stream = await navigator.mediaDevices.getUserMedia(constraints);
+  video.srcObject = stream;
+  await video.play();
+  state.currentDeviceId = deviceId || null;
+  await listCameras();
+  resizeRendererToVideo();
+}
+
+/* ===========================================================================
+   11) UI WIRING
+   =========================================================================== */
+function flashBanner(msg, kind = "warn", autoHideMs = 0) {
+  banner.textContent = msg;
+  banner.className = "show" + (kind === "info" ? " info" : "");
+  if (autoHideMs) setTimeout(hideBanner, autoHideMs);
+}
+function hideBanner() { banner.classList.remove("show"); }
+
+modeButtons.forEach(btn => {
+  btn.addEventListener("click", () => {
+    modeButtons.forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    state.mode = btn.dataset.mode;
+  });
+});
+
+selAnchor.addEventListener("change", () => {
+  state.anchorType = selAnchor.value;
+  smoothed.initialized = false; // avoid a big jump when switching anchors
+});
+
+selCamera.addEventListener("change", async () => {
+  try { await startCamera(selCamera.value); }
+  catch (e) { flashBanner("تغییر دوربین ممکن نشد: " + e.message); }
+});
+
+function bindSlider(rangeId, valueId, onChange) {
+  const r = document.getElementById(rangeId);
+  const v = document.getElementById(valueId);
+  const update = () => {
+    v.textContent = Number(r.value).toFixed(2).replace(/\.00$/, r.step === "1" ? "" : ".00");
+    onChange(parseFloat(r.value));
+  };
+  r.addEventListener("input", update);
+  update();
+}
+
+bindSlider("rOffX", "vOffX", val => state.settings.offset.x = val);
+bindSlider("rOffY", "vOffY", val => state.settings.offset.y = val);
+bindSlider("rOffZ", "vOffZ", val => state.settings.offset.z = val);
+bindSlider("rScale", "vScale", val => state.settings.scaleMultiplier = val);
+bindSlider("rRotX", "vRotX", val => state.settings.rotationOffsetDeg.x = val);
+bindSlider("rRotY", "vRotY", val => state.settings.rotationOffsetDeg.y = val);
+bindSlider("rRotZ", "vRotZ", val => state.settings.rotationOffsetDeg.z = val);
+bindSlider("rSmoothP", "vSmoothP", val => state.settings.positionSmoothing = val);
+bindSlider("rSmoothR", "vSmoothR", val => state.settings.rotationSmoothing = val);
+bindSlider("rSmoothS", "vSmoothS", val => state.settings.scaleSmoothing = val);
+
+btnSettings.addEventListener("click", () => {
+  panel.classList.add("open");
+  panelBackdrop.classList.add("show");
+});
+function closePanel() {
+  panel.classList.remove("open");
+  panelBackdrop.classList.remove("show");
+}
+panelClose.addEventListener("click", closePanel);
+panelBackdrop.addEventListener("click", closePanel);
+
+btnCalibrate.addEventListener("click", () => {
+  if (!video.videoWidth) return;
+  const nowMs = performance.now();
+  const result = state.poseLandmarker && state.poseLandmarker.detectForVideo(video, nowMs);
+  const worldLm = result && result.worldLandmarks && result.worldLandmarks[0];
+  if (!worldLm) { flashBanner("برای کالیبره کردن، ابتدا مطمئن شوید بدن شما در تصویر دیده می‌شود."); return; }
+  const target = computeAnchorTarget(mapWorldLandmarksToScene(worldLm));
+  if (target) calibrate(target);
+});
+
+btnStart.addEventListener("click", async () => {
+  btnStart.disabled = true;
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error("این مرورگر از Camera API پشتیبانی نمی‌کند.");
+    }
+    await startCamera();
+    chipCamera.textContent = "Camera: ON";
+    chipCamera.className = "chip on";
+
+    if (!state.poseLandmarker) {
+      flashBanner("در حال بارگذاری مدل Body Tracking...", "info");
+      await setupPoseLandmarker();
+    }
+    chipTracking.textContent = "Body Tracking: ON";
+    chipTracking.className = "chip on";
+    hideBanner();
+
+    window.addEventListener("resize", resizeRendererToVideo);
+    resizeRendererToVideo();
+
+    state.running = true;
+    btnCalibrate.disabled = false;
+    btnStart.querySelector(".ic").textContent = "⏸";
+    btnStart.lastChild.textContent = "Tracking...";
+    renderLoop();
+  } catch (err) {
+    console.error(err);
+    if (err.name === "NotAllowedError") {
+      flashBanner("اجازه دسترسی به دوربین داده نشد. لطفاً از تنظیمات مرورگر دسترسی را فعال کنید.");
+    } else if (err.name === "NotFoundError") {
+      flashBanner("هیچ دوربینی پیدا نشد.");
+    } else {
+      flashBanner("خطا: " + err.message);
+    }
+    btnStart.disabled = false;
+  }
+});
+
+// Long-press-free toggle for the skeleton via the "Skeleton" mode button
+// also flips the debug overlay flag so users see points/lines in that mode.
+document.querySelector('[data-mode="skeleton"]').addEventListener("click", () => {
+  state.showSkeleton = true;
+});
+document.querySelector('[data-mode="camera"]').addEventListener("click", () => {
+  state.showSkeleton = false;
+});
+document.querySelector('[data-mode="ar"]').addEventListener("click", () => {
+  // keep whatever skeleton toggle state the user had; AR mode can still
+  // show the skeleton on top if state.showSkeleton was left on
+});
+
+// Camera list is populated only after the user explicitly starts tracking
+// (inside startCamera(), once getUserMedia has been granted) — we never
+// call getUserMedia/enumerateDevices on page load, so no browser will show
+// a camera prompt until the user taps "Start Tracking".
+</script>
+</body>
+</html>
