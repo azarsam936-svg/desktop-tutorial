@@ -233,6 +233,7 @@
 <script type="module">
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { PoseLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 
 /* ==========================================================================
@@ -350,7 +351,14 @@ function normalizeAndScaleModel(root) {
   return wrapper;
 }
 
-new GLTFLoader().load(
+// Many downloaded GLBs (Sketchfab exports in particular) are compressed
+// with Draco; without this, GLTFLoader silently fails to load them.
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath("https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/draco/");
+const gltfLoader = new GLTFLoader();
+gltfLoader.setDRACOLoader(dracoLoader);
+
+gltfLoader.load(
   "./model.glb",
   (gltf) => {
     const wrapper = normalizeAndScaleModel(gltf.scene);
