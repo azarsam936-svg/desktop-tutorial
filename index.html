@@ -399,31 +399,40 @@ const ANCHORS = {
   rightLeg:  { frame: "limb",  a: "rightHip", b: "rightKnee" },
 };
 
-/** Build a torso local basis (Right / Up / Forward) + key points from world landmarks. */
+/** Build a torso local basis (Right / Up / Forward) + key points from world landmarks.
+ *  Deliberately does NOT require the hips: in normal phone framing the hips are
+ *  very often out of frame, and MediaPipe then has to guess their position,
+ *  which made the old hip-based "Up" vector noisy/unstable (looked like the
+ *  model "wasn't moving" because it kept getting damped toward bad guesses).
+ *  The nose is reliably in frame together with the shoulders in any upper-body
+ *  shot, so it's used as the vertical reference instead. */
 function computeTorsoFrame(w) {
   const ls = w[IDX.leftShoulder], rs = w[IDX.rightShoulder];
-  const lh = w[IDX.leftHip], rh = w[IDX.rightHip];
-  if (!ls || !rs || !lh || !rh) return null;
+  if (!ls || !rs) return null;
 
   const shoulderCenter = midpoint(ls, rs);
-  const hipCenter = midpoint(lh, rh);
-  // Position estimate for the torso: weighted blend of shoulders & hips
-  // (closer to the chest, per the brief) rather than shoulders alone.
-  const chestCenter = lerpVec3(shoulderCenter, hipCenter, 0.35);
+  const shoulderWidth = distance(ls, rs);
+  const nose = w[IDX.nose];
 
-  // Right = RightShoulder - LeftShoulder (world landmarks are already
-  // in "real" left/right, i.e. not mirrored, regardless of selfie view).
+  // Right = RightShoulder - LeftShoulder
   const right = normalize(sub(rs, ls));
-  // Up = ShoulderCenter - HipCenter
-  const up = normalize(sub(shoulderCenter, hipCenter));
-  // Forward = Right x Up  (out of the person's chest, right-handed)
-  let forward = normalize(cross(right, up));
+  // Up = ShoulderCenter -> Nose (points up through the neck/head)
+  const up = nose ? normalize(sub(nose, shoulderCenter)) : new THREE.Vector3(0, 1, 0);
+  // Forward = Right x Up (out of the person's chest, right-handed)
+  const forward = normalize(cross(right, up));
   // Re-orthogonalize Up so the basis stays a clean rotation matrix.
   const trueUp = normalize(cross(forward, right));
 
-  const shoulderWidth = distance(ls, rs);
+  // The chest sits roughly a shoulder-width below the shoulder line —
+  // estimated this way so it never needs the hips to be visible.
+  const chestCenter = shoulderCenter.clone().addScaledVector(trueUp, -shoulderWidth * 0.6);
 
-  return { shoulderCenter, hipCenter, chestCenter, nose: w[IDX.nose],
+  // Hips are only computed/used opportunistically, for anchors that
+  // explicitly ask for them (pelvis, legs) — everything else ignores them.
+  const lh = w[IDX.leftHip], rh = w[IDX.rightHip];
+  const hipCenter = (lh && rh) ? midpoint(lh, rh) : null;
+
+  return { shoulderCenter, hipCenter, chestCenter, nose: nose ? toVec3(nose) : chestCenter,
            right, up: trueUp, forward, shoulderWidth };
 }
 
@@ -439,6 +448,8 @@ function computeLimbFrame(w, def, torso) {
   const forward = normalize(cross(right, dir));
   return { origin, right, up: dir, forward, shoulderWidth: torso.shoulderWidth };
 }
+
+
 
 function frameToQuaternion(frame) {
   const m = new THREE.Matrix4().makeBasis(frame.right, frame.up, frame.forward);
@@ -487,28 +498,28 @@ function imageSpaceToWorld(nx, ny) {
 }
 function midVec3(a, b) { return a.clone().add(b).multiplyScalar(0.5); }
 
-/** Same shape as computeTorsoFrame(), but position/width come from on-screen (image) landmarks. */
+/** Same shape as computeTorsoFrame(), but position/width come from on-screen (image) landmarks.
+ *  Also avoids requiring the hips — see computeTorsoFrame() comment above. */
 function computeImageTorsoFrame(img) {
   const ls = img[IDX.leftShoulder], rs = img[IDX.rightShoulder];
-  const lh = img[IDX.leftHip], rh = img[IDX.rightHip];
-  if (!ls || !rs || !lh || !rh) return null;
+  if (!ls || !rs) return null;
 
   const lsW = imageSpaceToWorld(ls.x, ls.y);
   const rsW = imageSpaceToWorld(rs.x, rs.y);
-  const lhW = imageSpaceToWorld(lh.x, lh.y);
-  const rhW = imageSpaceToWorld(rh.x, rh.y);
-  const noseImg = img[IDX.nose];
-
   const shoulderCenter = midVec3(lsW, rsW);
-  const hipCenter = midVec3(lhW, rhW);
-  const chestCenter = lerpVec3(shoulderCenter, hipCenter, 0.35);
   const shoulderWidth = lsW.distanceTo(rsW); // grows/shrinks with the on-screen skeleton
 
-  return {
-    shoulderCenter, hipCenter, chestCenter,
-    nose: noseImg ? imageSpaceToWorld(noseImg.x, noseImg.y) : chestCenter,
-    shoulderWidth,
-  };
+  const noseImg = img[IDX.nose];
+  const noseW = noseImg ? imageSpaceToWorld(noseImg.x, noseImg.y) : null;
+  // "down" on screen: from nose toward the shoulder line, i.e. away from the
+  // head. Falls back to plain screen-down if the nose isn't visible either.
+  const downDir = noseW ? normalize(midVec3(lsW, rsW).clone().sub(noseW)) : new THREE.Vector3(0, -1, 0);
+  const chestCenter = shoulderCenter.clone().addScaledVector(downDir, shoulderWidth * 0.6);
+
+  const lh = img[IDX.leftHip], rh = img[IDX.rightHip];
+  const hipCenter = (lh && rh) ? midVec3(imageSpaceToWorld(lh.x, lh.y), imageSpaceToWorld(rh.x, rh.y)) : null;
+
+  return { shoulderCenter, hipCenter, chestCenter, nose: noseW || chestCenter, shoulderWidth };
 }
 
 /** Image-space counterpart of computeLimbFrame(): gives on-screen origin + a width metric. */
@@ -532,6 +543,7 @@ function computeAnchorTarget(worldLandmarks, imageLandmarks) {
     const imgTorso = computeImageTorsoFrame(imageLandmarks);
     if (!imgTorso) return null;
     origin = anchorOriginPoint(imgTorso, def.origin);
+    if (!origin) return null; // e.g. pelvis anchor selected but hips aren't in frame
     scaleMetric = imgTorso.shoulderWidth;
   } else {
     const limbRot = computeLimbFrame(worldLandmarks, def, torsoRot);
@@ -545,7 +557,7 @@ function computeAnchorTarget(worldLandmarks, imageLandmarks) {
   const quat = frameToQuaternion(rotFrame);
   const scale = Math.max(0.05, scaleMetric) * state.settings.scaleMultiplier;
 
-  return { position: origin.clone(), quaternion: quat, scale, torso };
+  return { position: origin.clone(), quaternion: quat, scale };
 }
 
 /* -------------------------- small vector helpers ------------------------- */
