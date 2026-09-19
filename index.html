@@ -455,24 +455,95 @@ function anchorOriginPoint(frame, key) {
   }
 }
 
-/** Full pipeline: world landmarks -> {position, quaternion, scale} target for the anchor root. */
-function computeAnchorTarget(worldLandmarks) {
-  const torso = computeTorsoFrame(worldLandmarks);
-  if (!torso) return null;
+/* ---------------------------------------------------------------------------
+   IMAGE-SPACE PROJECTION (this is what makes the model actually follow the
+   person's on-screen position and grow/shrink with them).
+   -------------------------------------------------------------------------
+   `worldLandmarks` from MediaPipe are hip-centered, real-world-metric
+   coordinates: they describe the body's SHAPE, but a person standing on the
+   left of frame and a person standing on the right of frame produce almost
+   the same worldLandmarks (both are ~0 around their own hips). Using them
+   for position/scale is why the model used to stay stuck near the center
+   and never grew or shrank with the visible skeleton.
+   The normalized `landmarks` (0..1 image-space, same ones used to draw the
+   debug skeleton) DO encode where the person is on screen and how big they
+   are, so we project those through the Three.js camera onto a fixed depth
+   plane and use THAT for position and scale. Rotation still comes from the
+   metric worldLandmarks basis above, since direction vectors are unaffected
+   by the hip-centering and are more stable for orientation.
+   --------------------------------------------------------------------------- */
+const MODEL_PLANE_Z = 0; // depth (world units) at which the anchor lives
+
+function imageSpaceToWorld(nx, ny) {
+  const d = camera3d.position.z - MODEL_PLANE_Z;
+  const vFov = THREE.MathUtils.degToRad(camera3d.fov);
+  const visibleHeight = 2 * Math.tan(vFov / 2) * d;
+  const visibleWidth = visibleHeight * camera3d.aspect;
+  return new THREE.Vector3(
+    (nx - 0.5) * visibleWidth,
+    (0.5 - ny) * visibleHeight,
+    MODEL_PLANE_Z
+  );
+}
+function midVec3(a, b) { return a.clone().add(b).multiplyScalar(0.5); }
+
+/** Same shape as computeTorsoFrame(), but position/width come from on-screen (image) landmarks. */
+function computeImageTorsoFrame(img) {
+  const ls = img[IDX.leftShoulder], rs = img[IDX.rightShoulder];
+  const lh = img[IDX.leftHip], rh = img[IDX.rightHip];
+  if (!ls || !rs || !lh || !rh) return null;
+
+  const lsW = imageSpaceToWorld(ls.x, ls.y);
+  const rsW = imageSpaceToWorld(rs.x, rs.y);
+  const lhW = imageSpaceToWorld(lh.x, lh.y);
+  const rhW = imageSpaceToWorld(rh.x, rh.y);
+  const noseImg = img[IDX.nose];
+
+  const shoulderCenter = midVec3(lsW, rsW);
+  const hipCenter = midVec3(lhW, rhW);
+  const chestCenter = lerpVec3(shoulderCenter, hipCenter, 0.35);
+  const shoulderWidth = lsW.distanceTo(rsW); // grows/shrinks with the on-screen skeleton
+
+  return {
+    shoulderCenter, hipCenter, chestCenter,
+    nose: noseImg ? imageSpaceToWorld(noseImg.x, noseImg.y) : chestCenter,
+    shoulderWidth,
+  };
+}
+
+/** Image-space counterpart of computeLimbFrame(): gives on-screen origin + a width metric. */
+function computeImageLimbFrame(img, def) {
+  const a = img[IDX[def.a]], b = img[IDX[def.b]];
+  if (!a || !b) return null;
+  const aW = imageSpaceToWorld(a.x, a.y);
+  const bW = imageSpaceToWorld(b.x, b.y);
+  return { origin: midVec3(aW, bW), widthMetric: aW.distanceTo(bW) };
+}
+
+/** Full pipeline: world + image landmarks -> {position, quaternion, scale} target for the anchor root. */
+function computeAnchorTarget(worldLandmarks, imageLandmarks) {
+  const torsoRot = computeTorsoFrame(worldLandmarks); // rotation only
+  if (!torsoRot) return null;
 
   const def = ANCHORS[state.anchorType] || ANCHORS.chest;
-  let frame, origin;
+  let rotFrame = torsoRot, origin, scaleMetric;
+
   if (def.frame === "torso") {
-    frame = torso;
-    origin = anchorOriginPoint(torso, def.origin);
+    const imgTorso = computeImageTorsoFrame(imageLandmarks);
+    if (!imgTorso) return null;
+    origin = anchorOriginPoint(imgTorso, def.origin);
+    scaleMetric = imgTorso.shoulderWidth;
   } else {
-    frame = computeLimbFrame(worldLandmarks, def, torso);
-    if (!frame) return null;
-    origin = frame.origin;
+    const limbRot = computeLimbFrame(worldLandmarks, def, torsoRot);
+    const imgLimb = computeImageLimbFrame(imageLandmarks, def);
+    if (!limbRot || !imgLimb) return null;
+    rotFrame = limbRot;
+    origin = imgLimb.origin;
+    scaleMetric = imgLimb.widthMetric;
   }
 
-  const quat = frameToQuaternion(frame);
-  const scale = Math.max(0.05, frame.shoulderWidth) * state.settings.scaleMultiplier;
+  const quat = frameToQuaternion(rotFrame);
+  const scale = Math.max(0.05, scaleMetric) * state.settings.scaleMultiplier;
 
   return { position: origin.clone(), quaternion: quat, scale, torso };
 }
@@ -653,8 +724,9 @@ function renderLoop() {
 
     if (state.mode === "ar") {
       const worldLm = result.worldLandmarks && result.worldLandmarks[0];
+      const imgLm = result.landmarks[0];
       const source = worldLm ? mapWorldLandmarksToScene(worldLm) : null;
-      const target = source ? computeAnchorTarget(source) : null;
+      const target = (source && imgLm) ? computeAnchorTarget(source, imgLm) : null;
       if (target) applyAnchorTarget(target);
     }
   } else {
@@ -766,8 +838,9 @@ btnCalibrate.addEventListener("click", () => {
   const nowMs = performance.now();
   const result = state.poseLandmarker && state.poseLandmarker.detectForVideo(video, nowMs);
   const worldLm = result && result.worldLandmarks && result.worldLandmarks[0];
-  if (!worldLm) { flashBanner("برای کالیبره کردن، ابتدا مطمئن شوید بدن شما در تصویر دیده می‌شود."); return; }
-  const target = computeAnchorTarget(mapWorldLandmarksToScene(worldLm));
+  const imgLm = result && result.landmarks && result.landmarks[0];
+  if (!worldLm || !imgLm) { flashBanner("برای کالیبره کردن، ابتدا مطمئن شوید بدن شما در تصویر دیده می‌شود."); return; }
+  const target = computeAnchorTarget(mapWorldLandmarksToScene(worldLm), imgLm);
   if (target) calibrate(target);
 });
 
